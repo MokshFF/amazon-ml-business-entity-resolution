@@ -1,81 +1,113 @@
 """
 Candidate Generation and Blocking Module.
 
-Responsible for reducing the O(N^2) pairwise search space between Source 1
-and (Source 2 + Source 3) records to a high-recall candidate set.
+Responsible for reducing the O(N^2) pairwise comparison space to a high-recall candidate pool.
+Blocking defines the recall ceiling: any true match missed during blocking cannot be recovered later.
 
-Team Role Assigned: Member 2 (Blocking, Candidate generation, candidate_pairs.tsv).
+50/50 Technical Ownership:
+- Lead: Moksh (Blocking Strategy A: Name token indexing & character prefix blocking)
+- Lead: Dhwaj [Team Leader] (Blocking Strategy B: Country-based partitions & address token indexing)
+
+MEMORY EFFICIENCY:
+- Avoid quadratic cross-joins (all-vs-all).
+- Use inverted indexes and sparse hash mappings.
+- Bound max candidates per entity to control downstream feature extraction costs.
 """
 
 from typing import Dict, List, Mapping, Optional, Sequence, Set
 import pandas as pd
-from src.utils import save_submission_tsv
+from src.utils import save_submission_tsv, setup_logger
+
+logger = setup_logger("blocking")
 
 
-class CandidateGenerator:
-    """Interface and pipeline for blocking and candidate generation."""
+class BlockingStrategyA:
+    """Strategy A — Name-Centric Blocking.
+    Lead: Moksh
+    Explores:
+        - Token-level inverted index over distinctive business name tokens
+        - Character n-gram and prefix blocking keys (e.g., first 3-4 chars)
+    """
 
-    def __init__(self, max_candidates: int = 50, country_blocking: bool = True):
-        """Initializes candidate generator with blocking configuration.
-
-        Args:
-            max_candidates: Maximum candidates allowed per Source 1 entity.
-            country_blocking: Whether to strictly block on country matching.
-        """
+    def __init__(self, max_candidates: int = 50):
         self.max_candidates = max_candidates
-        self.country_blocking = country_blocking
+        self.index: Dict[str, List[str]] = {}
 
-    def build_index(self, s2_records: pd.DataFrame, s3_records: pd.DataFrame) -> None:
-        """Builds candidate search indices over combined Source 2 and Source 3 records.
-
-        Args:
-            s2_records: Preprocessed DataFrame for Source 2 records.
-            s3_records: Preprocessed DataFrame for Source 3 records.
-        """
-        # TODO [Member 2]: Combine S2 and S3 records and build indexing data structures:
-        #   - Token-level inverted indices (e.g., TF-IDF top terms or token sets)
-        #   - Character n-gram blocking keys
-        #   - Phonetic/Soundex blocking keys on core business tokens
-        #   - Country-based partitions (must handle US, India, France dynamically)
+    def build_index(self, records: pd.DataFrame) -> None:
+        """Builds name-based inverted index from candidate records."""
+        # TODO [Moksh]: Build token/prefix inverted index on candidate names
         pass
 
-    def generate_candidates_for_entity(self, s1_row: pd.Series) -> List[str]:
-        """Generates candidate IDs (from S2 / S3) for a single Source 1 record.
-
-        Args:
-            s1_row: A single row representing a preprocessed Source 1 record.
-
-        Returns:
-            List[str]: List of candidate entity IDs (prefixed with 'S2-' or 'S3-').
-        """
-        # TODO [Member 2]: Query blocking index and rank/filter candidates up to self.max_candidates.
+    def retrieve_candidates(self, s1_row: pd.Series) -> List[str]:
+        """Retrieves candidate entity IDs for a single Source 1 record."""
+        # TODO [Moksh]: Query index using S1 name tokens, rank and truncate to max_candidates
         return []
 
-    def generate_all_candidates(
+
+class BlockingStrategyB:
+    """Strategy B — Country & Address Partitioning.
+    Lead: Dhwaj [Team Leader]
+    Explores:
+        - Exact country partitioning (dynamic: US, India, France, etc.)
+        - Address token indexing (postal codes, street numbers, primary location tokens)
+    """
+
+    def __init__(self, max_candidates: int = 50):
+        self.max_candidates = max_candidates
+        self.index: Dict[str, List[str]] = {}
+
+    def build_index(self, records: pd.DataFrame) -> None:
+        """Builds country-partitioned address index from candidate records."""
+        # TODO [Dhwaj]: Build address/country partitioned indexing structure
+        pass
+
+    def retrieve_candidates(self, s1_row: pd.Series) -> List[str]:
+        """Retrieves candidate entity IDs matching country and address criteria."""
+        # TODO [Dhwaj]: Query index with country constraint and address tokens
+        return []
+
+
+class MultiStrategyBlocker:
+    """Unified blocking interface combining Strategy A (Moksh) and Strategy B (Dhwaj).
+    Ensures maximum candidate recall while controlling reduction ratio.
+    """
+
+    def __init__(self, max_candidates_per_entity: int = 50):
+        self.max_candidates_per_entity = max_candidates_per_entity
+        self.strategy_a = BlockingStrategyA(max_candidates=max_candidates_per_entity)
+        self.strategy_b = BlockingStrategyB(max_candidates=max_candidates_per_entity)
+
+    def fit_indices(self, s2_records: pd.DataFrame, s3_records: pd.DataFrame) -> None:
+        """Constructs blocking indexes over combined Source 2 and Source 3 candidate records."""
+        logger.info("Building multi-strategy candidate blocking indexes...")
+        combined_cands = pd.concat([s2_records, s3_records], ignore_index=True)
+        self.strategy_a.build_index(combined_cands)
+        self.strategy_b.build_index(combined_cands)
+        logger.info("Candidate indexing complete.")
+
+    def get_candidates_for_entity(self, s1_row: pd.Series) -> List[str]:
+        """Retrieves and merges candidate IDs from both strategies for a single S1 entity."""
+        cands_a = self.strategy_a.retrieve_candidates(s1_row)
+        cands_b = self.strategy_b.retrieve_candidates(s1_row)
+
+        # Union while preserving deterministic order and deduplicating
+        merged = list(dict.fromkeys(cands_a + cands_b))
+        return merged[: self.max_candidates_per_entity]
+
+    def generate_candidate_map(
         self,
         s1_records: pd.DataFrame,
         s2_records: pd.DataFrame,
         s3_records: pd.DataFrame,
     ) -> Dict[str, List[str]]:
-        """Executes candidate generation across all Source 1 entities.
-
-        Args:
-            s1_records: Preprocessed Source 1 records DataFrame.
-            s2_records: Preprocessed Source 2 records DataFrame.
-            s3_records: Preprocessed Source 3 records DataFrame.
-
-        Returns:
-            Dict[str, List[str]]: Map of source1_entity_id -> list of candidate entity IDs.
-        """
-        self.build_index(s2_records, s3_records)
+        """Generates candidate map for all Source 1 records."""
+        self.fit_indices(s2_records, s3_records)
 
         candidates_map: Dict[str, List[str]] = {}
-        # Ensure every Source 1 entity has an entry (even if empty)
         for _, s1_row in s1_records.iterrows():
             s1_id = str(s1_row["entity_id"]).strip()
-            candidates = self.generate_candidates_for_entity(s1_row)
-            # Deduplicate candidate IDs while preserving order
-            candidates_map[s1_id] = list(dict.fromkeys(candidates))
+            cands = self.get_candidates_for_entity(s1_row)
+            candidates_map[s1_id] = cands
 
         return candidates_map
 
@@ -85,12 +117,8 @@ def export_candidate_pairs(
     candidates_map: Mapping[str, Sequence[str]],
     output_path: str,
 ) -> None:
-    """Exports candidate pairs to the official candidate_pairs.tsv format.
-
-    Args:
-        source1_ids: All Source 1 entity IDs in the dataset split.
-        candidates_map: Mapping from source1_id to candidate IDs.
-        output_path: Path where candidate_pairs.tsv will be written.
+    """Exports candidate pairs to candidate_pairs.tsv.
+    IMPORTANT: This must represent the exact candidate set fed into the final ML matching model.
     """
     save_submission_tsv(
         source1_ids=source1_ids,
@@ -104,15 +132,7 @@ def compute_blocking_metrics(
     ground_truth: Mapping[str, Set[str]],
     candidates_map: Mapping[str, Sequence[str]],
 ) -> Dict[str, float]:
-    """Computes blocking recall (recall ceiling) and candidate reduction ratio.
-
-    Args:
-        ground_truth: Mapping from source1_id to true matching IDs.
-        candidates_map: Mapping from source1_id to candidate IDs from blocking.
-
-    Returns:
-        Dict[str, float]: Dictionary with 'blocking_recall', 'avg_candidates_per_entity'.
-    """
+    """Computes blocking recall ceiling and candidate reduction ratio."""
     total_true_matches = sum(len(matches) for matches in ground_truth.values())
     captured_matches = 0
     total_candidates = 0

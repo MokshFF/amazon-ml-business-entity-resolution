@@ -1,27 +1,21 @@
 """
-Utility functions for Amazon ML Challenge 2026: Business Entity Resolution.
+Shared Utility Functions Module.
 
-Provides shared helper functions for configuration parsing, TSV data loading,
-output formatting conforming to submission specs, logging, and evaluation metrics (F0.5).
+Provides memory-efficient data loading, submission TSV generation,
+entity-level F0.5 evaluation, and taxonomy-based error analysis.
+
+50/50 Joint Responsibility: Moksh & Dhwaj [Team Leader].
 """
 
 import logging
 import os
-from typing import Any, Dict, List, Mapping, Sequence, Set, Tuple
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 import pandas as pd
 import yaml
 
 
-def setup_logger(name: str = "entity_resolution", level: str = "INFO") -> logging.Logger:
-    """Configures and returns a standard logger with a clean format.
-
-    Args:
-        name: Name of the logger instance.
-        level: Logging level (e.g., 'INFO', 'DEBUG', 'WARNING').
-
-    Returns:
-        logging.Logger: Configured logger instance.
-    """
+def setup_logger(name: str = "er_pipeline", level: str = "INFO") -> logging.Logger:
+    """Configures clean logging format for pipeline execution."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler()
@@ -36,85 +30,90 @@ def setup_logger(name: str = "entity_resolution", level: str = "INFO") -> loggin
 
 
 def load_config(config_path: str = "configs/config.yaml") -> Dict[str, Any]:
-    """Loads YAML configuration file into a dictionary.
-
-    Args:
-        config_path: Path to the YAML configuration file.
-
-    Returns:
-        Dict[str, Any]: Parsed configuration key-value mappings.
-
-    Raises:
-        FileNotFoundError: If the config file does not exist.
-        yaml.YAMLError: If parsing fails.
-    """
+    """Loads configuration YAML file."""
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Configuration file not found at: {config_path}")
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
     with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return config
+        return yaml.safe_load(f)
 
 
-def load_source_tsv(file_path: str) -> pd.DataFrame:
-    """Reads a source TSV file using explicit tab separation.
-
-    Expected columns in source files:
-        - entity_id: Unique record ID (prefixed S1-, S2-, S3-)
-        - business_name: Business name string
-        - business_address: Business address string
-        - country: Country identifier (e.g., US, India, France)
+def load_source_tsv(
+    file_path: str,
+    usecols: Optional[List[str]] = None,
+    nrows: Optional[int] = None,
+) -> pd.DataFrame:
+    """Memory-conscious loader for source TSV files.
 
     Args:
-        file_path: Path to the TSV file.
+        file_path: Path to TSV file.
+        usecols: Selective columns to load to minimize RAM usage.
+        nrows: Optional row limit for fast local prototyping.
 
     Returns:
-        pd.DataFrame: Loaded DataFrame with consistent string types and NaN fill.
+        pd.DataFrame: Loaded DataFrame with memory-efficient dtypes.
     """
-    df = pd.read_csv(
+    dtypes = {
+        "entity_id": "category",
+        "business_name": "string",
+        "business_address": "string",
+        "country": "category",
+    }
+    if usecols:
+        dtypes = {k: v for k, v in dtypes.items() if k in usecols}
+
+    return pd.read_csv(
         file_path,
         sep="\t",
-        dtype={
-            "entity_id": str,
-            "business_name": str,
-            "business_address": str,
-            "country": str,
-        },
+        usecols=usecols,
+        nrows=nrows,
+        dtype=dtypes,
         keep_default_na=False,
     )
-    return df
+
+
+def load_source_chunks(
+    file_path: str,
+    chunk_size: int = 50000,
+    usecols: Optional[List[str]] = None,
+) -> Iterator[pd.DataFrame]:
+    """Iterates through large TSV datasets in memory-manageable chunks."""
+    dtypes = {
+        "entity_id": "string",
+        "business_name": "string",
+        "business_address": "string",
+        "country": "string",
+    }
+    if usecols:
+        dtypes = {k: v for k, v in dtypes.items() if k in usecols}
+
+    for chunk in pd.read_csv(
+        file_path,
+        sep="\t",
+        chunksize=chunk_size,
+        usecols=usecols,
+        dtype=dtypes,
+        keep_default_na=False,
+    ):
+        yield chunk
 
 
 def load_ground_truth(file_path: str) -> Dict[str, Set[str]]:
-    """Loads training ground-truth matching TSV file.
-
-    Format expected:
-        source1_entity_id	matched_entity_ids
-        S1-00001	S2-00047,S3-00812
-        S1-00002
-
-    Args:
-        file_path: Path to train_ground_truth.tsv.
-
-    Returns:
-        Dict[str, Set[str]]: Mapping from source1_entity_id to a set of matched IDs.
-    """
+    """Loads ground-truth matching TSV file into memory-efficient set mapping."""
     df = pd.read_csv(
         file_path,
         sep="\t",
         dtype={"source1_entity_id": str, "matched_entity_ids": str},
         keep_default_na=False,
     )
-    ground_truth = {}
+    gt: Dict[str, Set[str]] = {}
     for _, row in df.iterrows():
-        s1_id = str(row["source1_entity_id"]).strip()
-        matched_str = str(row["matched_entity_ids"]).strip()
-        if matched_str:
-            ground_truth[s1_id] = set(
-                m.strip() for m in matched_str.split(",") if m.strip()
-            )
+        s1 = str(row["source1_entity_id"]).strip()
+        matched = str(row["matched_entity_ids"]).strip()
+        if matched:
+            gt[s1] = set(m.strip() for m in matched.split(",") if m.strip())
         else:
-            ground_truth[s1_id] = set()
-    return ground_truth
+            gt[s1] = set()
+    return gt
 
 
 def save_submission_tsv(
@@ -123,80 +122,65 @@ def save_submission_tsv(
     output_path: str,
     id_col_name: str = "matched_entity_ids",
 ) -> None:
-    """Writes a submission or candidate TSV file strictly conforming to challenge rules.
-
-    Rules enforced:
-        - Exactly one row per Source 1 entity.
-        - Tab-separated ('\\t').
-        - Comma-separated target IDs with no extra spaces or quotation marks.
-        - Empty string for entities with zero matches / candidates.
-        - No duplicate IDs within any single row.
-
-    Args:
-        source1_ids: Ordered sequence of all Source 1 entity IDs that must be included.
-        id_mapping: Mapping from Source 1 ID to list/set of matched or candidate IDs.
-        output_path: Target path for the output TSV.
-        id_col_name: Column name for target IDs ('matched_entity_ids' or 'candidate_entity_ids').
+    """Formats and writes submission TSV conforming strictly to competition rules:
+    - Exactly one row per Source 1 entity
+    - Tab-separated ('\\t')
+    - Comma-separated match IDs with zero quoting
+    - Empty string for entities with zero matches (singletons)
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     rows: List[Tuple[str, str]] = []
 
     for s1_id in source1_ids:
-        raw_targets = id_mapping.get(s1_id, [])
+        raw_ids = id_mapping.get(s1_id, [])
         # Deduplicate while preserving order
-        deduped_targets = list(dict.fromkeys(raw_targets))
-        joined_targets = ",".join(deduped_targets)
-        rows.append((s1_id, joined_targets))
+        deduped = list(dict.fromkeys(raw_ids))
+        rows.append((s1_id, ",".join(deduped)))
 
     df_out = pd.DataFrame(rows, columns=["source1_entity_id", id_col_name])
     df_out.to_csv(output_path, sep="\t", index=False)
 
 
 def calculate_f05(precision: float, recall: float, eps: float = 1e-9) -> float:
-    """Computes the precision-weighted F0.5 score:
-    
-    Formula:
-        F_beta = (1 + beta^2) * (precision * recall) / ((beta^2 * precision) + recall)
-        With beta = 0.5:
-        F_0.5 = (1.25 * precision * recall) / (0.25 * precision + recall)
-
-    Args:
-        precision: Macro or micro precision score in [0.0, 1.0].
-        recall: Macro or micro recall score in [0.0, 1.0].
-        eps: Small epsilon to prevent division by zero.
-
-    Returns:
-        float: Computed F0.5 score.
-    """
-    beta_sq = 0.5**2  # 0.25
-    numerator = (1 + beta_sq) * precision * recall
-    denominator = (beta_sq * precision) + recall
-    if denominator < eps:
+    """Computes F0.5 score: beta=0.5 weights precision twice as heavily as recall."""
+    beta_sq = 0.25
+    num = (1 + beta_sq) * precision * recall
+    denom = (beta_sq * precision) + recall
+    if denom < eps:
         return 0.0
-    return numerator / denominator
+    return num / denom
 
 
 def evaluate_entity_resolution(
     ground_truth: Mapping[str, Set[str]],
     predictions: Mapping[str, Set[str]],
 ) -> Dict[str, float]:
-    """Evaluates ER predictions against ground truth computing Pairwise Precision, Recall, and F0.5.
+    """Entity-level evaluation conforming to the official challenge specification.
 
-    Args:
-        ground_truth: Mapping from source1_id to set of true matching IDs.
-        predictions: Mapping from source1_id to set of predicted matching IDs.
-
-    Returns:
-        Dict[str, float]: Evaluation metrics: precision, recall, f05, tp, fp, fn.
+    Computes:
+        - True Positives (TP): Correctly identified matching pairs
+        - False Positives (FP): Non-matching pairs incorrectly predicted as matches (false merges)
+        - False Negatives (FN): True matches missed by model
+        - Singleton Accuracy: Precision on true singletons (entities with 0 matches)
+        - Precision, Recall, and F0.5 score
     """
     tp = 0
     fp = 0
     fn = 0
+    correct_singletons = 0
+    total_singletons = 0
 
-    all_keys = set(ground_truth.keys()).union(set(predictions.keys()))
-    for s1_id in all_keys:
+    all_s1_ids = set(ground_truth.keys()).union(set(predictions.keys()))
+
+    for s1_id in all_s1_ids:
         true_set = ground_truth.get(s1_id, set())
         pred_set = predictions.get(s1_id, set())
+
+        # Check singleton performance
+        if len(true_set) == 0:
+            total_singletons += 1
+            if len(pred_set) == 0:
+                correct_singletons += 1
 
         tp += len(pred_set.intersection(true_set))
         fp += len(pred_set - true_set)
@@ -205,6 +189,9 @@ def evaluate_entity_resolution(
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f05 = calculate_f05(precision, recall)
+    singleton_acc = (
+        correct_singletons / total_singletons if total_singletons > 0 else 1.0
+    )
 
     return {
         "precision": precision,
@@ -213,4 +200,31 @@ def evaluate_entity_resolution(
         "tp": float(tp),
         "fp": float(fp),
         "fn": float(fn),
+        "singleton_accuracy": singleton_acc,
+        "total_singletons": float(total_singletons),
     }
+
+
+def categorize_error(
+    s1_row: pd.Series,
+    cand_row: pd.Series,
+    is_false_positive: bool,
+) -> str:
+    """Taxonomy-based error classifier to guide targeted pipeline improvements.
+
+    Categories:
+        - 'typo': Minor character differences in names
+        - 'abbreviation': Shortened or expanded tokens
+        - 'legal_suffix': Inconsistent legal designations
+        - 'address_variation': Discrepancies in street, area, or landmark
+        - 'missing_address': Incomplete address fields
+        - 'transliteration': Phonetic or regional spelling differences
+        - 'similar_business_names': Different businesses sharing popular tokens
+        - 'false_merge': Non-matching entities merged incorrectly
+        - 'missed_match': True pair failed to match
+        - 'singleton_error': Singleton incorrectly assigned a match
+    """
+    # TODO [Moksh & Dhwaj]: Implement rule-based error categorization based on validation outputs
+    if is_false_positive:
+        return "false_merge"
+    return "missed_match"
