@@ -1,0 +1,65 @@
+# Amazon ML Challenge 2026 - Business Entity Resolution Configuration
+
+# General Project Settings
+project:
+  name: "amazon-ml-business-entity-resolution"
+  random_seed: 42
+  log_level: "INFO"
+
+# Dataset and File Paths (relative paths; modify locally or via environment variables)
+paths:
+  # Base dataset directory (keep local, outside git tracking)
+  dataset_dir: "dataset"
+  
+  # Training data files
+  train:
+    source1: "dataset/train/train_source1.tsv"
+    source2: "dataset/train/train_source2.tsv"
+    source3: "dataset/train/train_source3.tsv"
+    ground_truth: "dataset/train/train_ground_truth.tsv"
+  
+  # Test data files
+  test:
+    source1: "dataset/test/test_source1.tsv"
+    source2: "dataset/test/test_source2.tsv"
+    source3: "dataset/test/test_source3.tsv"
+  
+  # Submission and intermediate outputs
+  output:
+    output_dir: "output"
+    candidate_pairs: "output/candidate_pairs.tsv"
+    matching_results: "output/matching_results.tsv"
+    model_checkpoint_dir: "output/checkpoints"
+
+# Data Processing & Chunking Parameters
+processing:
+  chunk_size: 50000          # Process large datasets in manageable chunks
+  n_jobs: -1                 # CPU workers for parallel operations (-1 for all cores)
+
+# Blocking & Candidate Generation Settings
+blocking:
+  max_candidates_per_entity: 50
+  # Blocking keys and indices to be explored by Member 2
+  strategies:
+    - name: "standard_blocking"
+      enabled: true
+    - name: "token_inverted_index"
+      enabled: true
+
+# Feature Engineering Settings
+features:
+  # Similarity features computed on (Source 1, Candidate) pairs
+  name_similarity_metrics:
+    - "levenshtein"
+    - "token_sort_ratio"
+    - "jaro_winkler"
+  address_similarity_metrics:
+    - "token_set_ratio"
+    - "cosine_tfidf"
+  country_exact_match: true
+
+# Matching Model & Decision Thresholds
+model:
+  type: "logistic_regression"  # e.g., logistic_regression, random_forest, lightgbm
+  decision_threshold: 0.5      # Threshold tuned on validation split for F0.5
+  validation_split_ratio: 0.2  # Train/Validation holdout ratio
